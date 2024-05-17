@@ -1,0 +1,318 @@
+---
+title: "Predictive Analysis Competition (PAC) Project"
+author: "Chenyu Mao"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In response to the assignment from class APAN 5200: Predictive Analysis Competition (PAC) Project, I have constructed a predictive model to forecast the price for used cars. The accuracy of the model was measured by the root mean square error (RMSE). Lower RMSE means better model. The data sets, including the analysis data and the scoring data, are from Kaggle Competition: How much is your car worth? I used RStudio to complete all data processing and model development.
+
+This report will cover importing data, cleaning data, development of different models as well as my mistakes and insights of how to optimize the final model. In the end of this competition, the model produced calculated and RMSE of 1,759.14494 using the final XGBOOST model, and I was ranked No.119 in the private leaderboard on Kaggle.
+
+## Step 1: Data Importing & Packages Loading
+
+```{r setwd & read data}
+setwd("/Users/maocheny/Desktop/Book/Columbia-研究生/APAN 5200")
+
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2))
+}
+
+data = read.csv('analysisData.csv')
+scoring = read.csv('scoringData.csv')
+```
+
+At the beginning, I set up the working direction for R to read my dataset. I named my analysis dataset as data and scoring dataset as scoring. In addition, considering that the model was measured only by RMSE, I definite a RMSE function to help me calculate the RMSE of future models easier. Next, I loaded the necessary packages for the future use.
+
+```{r loading libraries, results='hide'}
+library(caret)
+library(car)
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(xgboost)
+```
+
+I loaded all the libraries in prepare for the future use.
+
+## Step 2: Analysis Data Cleaning
+
+```{r check the dataset}
+sapply(data, class)
+sum(is.na(data))
+```
+Applying the sapply and na. function, we can see there are many different classes and 31380 of missing values in the analysis data set. Therefore, I need selected variables as predictors in my predictive model.
+
+```{r variable selection}
+selected_data <- data %>% select_if(is.numeric)
+names(selected_data)
+```
+
+I used dplyr library to choose all the numerical variables as predictors in my predictive model. Now I need to fill the missing values both in the analysis data and scoring data using median.
+
+```{r fill the missing with median}
+selected_data$fuel_tank_volume_gallons[is.na(selected_data$fuel_tank_volume_gallons)] <- median(selected_data$fuel_tank_volume_gallons, na.rm = TRUE)
+selected_data$highway_fuel_economy[is.na(selected_data$highway_fuel_economy)] <- median(selected_data$highway_fuel_economy, na.rm = TRUE)
+selected_data$city_fuel_economy[is.na(selected_data$city_fuel_economy)] <- median(selected_data$city_fuel_economy, na.rm = TRUE)
+selected_data$wheelbase_inches[is.na(selected_data$wheelbase_inches)] <- median(selected_data$wheelbase_inches, na.rm = TRUE)
+selected_data$back_legroom_inches[is.na(selected_data$back_legroom_inches)] <- median(selected_data$back_legroom_inches, na.rm = TRUE)
+selected_data$front_legroom_inches[is.na(selected_data$front_legroom_inches)] <- median(selected_data$front_legroom_inches, na.rm = TRUE)
+selected_data$length_inches[is.na(selected_data$length_inches)] <- median(selected_data$length_inches, na.rm = TRUE)
+selected_data$width_inches[is.na(selected_data$width_inches)] <- median(selected_data$width_inches, na.rm = TRUE)
+selected_data$height_inches[is.na(selected_data$height_inches)] <- median(selected_data$height_inches, na.rm = TRUE)
+selected_data$engine_displacement[is.na(selected_data$engine_displacement)] <- median(selected_data$engine_displacement, na.rm = TRUE)
+selected_data$horsepower[is.na(selected_data$horsepower)] <- median(selected_data$horsepower, na.rm = TRUE)
+selected_data$daysonmarket[is.na(selected_data$daysonmarket)] <- median(selected_data$daysonmarket, na.rm = TRUE)
+selected_data$maximum_seating[is.na(selected_data$maximum_seating)] <- median(selected_data$maximum_seating, na.rm = TRUE)
+selected_data$year[is.na(selected_data$year)] <- median(selected_data$year, na.rm = TRUE)
+selected_data$mileage[is.na(selected_data$mileage)] <- median(selected_data$mileage, na.rm = TRUE)
+selected_data$owner_count[is.na(selected_data$owner_count)] <- median(selected_data$owner_count, na.rm = TRUE)
+selected_data$seller_rating[is.na(selected_data$seller_rating)] <- median(selected_data$seller_rating, na.rm = TRUE)
+```
+
+In this part of the code, I filled the missing values both in the analysis data using the median. There are two reasons why I used median to fill in the missing values. One is because the median is not sensitive to outliers, which helps the data to maintain its central tendency. The other reason is because median is an effective method of imputation, which can better represents the majority of data when the data is not normally distributed.
+
+```{r check the final variables}
+selected_data <- selected_data[, -which(names(selected_data) == "id")]
+sapply(selected_data, class)
+sum(is.na(selected_data))
+```
+
+Here, I removed the variable named "id" because there is no practical meaning in it. This variable is only used for distinguishing different data. Additionally, I used sapply and is.na function to check the class of my selected data and whether there is any missing values or not.
+
+## Step 3: Data Split & Matrix
+
+```{r data split}
+set.seed(100)
+index <- createDataPartition(selected_data$price, p= 0.8, list=FALSE)
+train <- selected_data[index, ]
+test <- selected_data[-index, ]
+```
+
+I used createDataPartition function from library caret to split the data into train and test subsets according to the variable "price". I used p = 0.8, which means 80% of the data is randomly selected for training, leaving the remaining 20% for testing.
+
+```{r matrix}
+dtrain <- xgb.DMatrix(data = as.matrix(train[, -which(names(train) == "price")]), label = train$price)
+dtest <- xgb.DMatrix(data = as.matrix(test[, -which(names(test) == "price")]), label = test$price)
+```
+
+Because I want to used the XGBoost model to predict the price, I need to convert the data into matrix. In order to do that, I used xgb.DMatrix function.
+
+## Step 4: Basic XGBoost Model
+
+```{r XGBoost Model, results='hide'}
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror"
+)
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 10000,
+  watchlist = list(eval = dtest, train = dtrain),
+  print_every_n = 10,
+  early_stopping_rounds = 500,
+  maximize = FALSE
+)
+```
+
+This is a XGBoost Model with basic parameters. I hide the process of the code because it is too long to display in the html file. I used "gbtree" as booster to use a tree-based model as the learner. I also set objective as "reg:squarederror" to squared error for regression tasks. In the xgb_model, I set the maximum number of 10000 rounds of iterations and 500 rounds of early_stopping_rounds to prevent over fitting. In addition, I put watchlist = list(eval = dtest, train = dtrain) to monitor the model's performance during training.
+
+```{r rmse model_1}
+pred_1 = predict(xgb_model,
+                newdata = dtest)
+
+rmse_1 = rmse(test$price, pred_1)
+rmse_1
+```
+The first XGBoost model has rmse of 4290.61. 
+
+## Step 5: Find the Best Parameters
+
+```{r find the best parameters, results='hide'}
+
+params_grid <- expand.grid(
+  nrounds = 100, 
+  eta = c(0.01, 0.05, 0.1),
+  max_depth = c(8, 9),
+  gamma = 0,
+  min_child_weight = c(2, 3),
+  subsample = c(0.75, 1),
+  colsample_bytree = c(0.75, 1)
+)
+
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE,
+  allowParallel = TRUE
+)
+
+xgb_model <- train(
+  price ~ .,
+  data = train, 
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = params_grid,
+  metric = "RMSE"
+)
+
+```
+
+I hide the process of this code but remain its output because the process is too long. In this code, the goal is to identify the best parameters for an XGBoost regression model predicting the price. The params_grid defines a grid of parameters to be explored, including nrounds, eta (learning rate), max_depth (depth of trees), gamma (min loss reduction), min_child_weight, subsample, and colsample_bytree. These parameters play a crucial role in the model's ability to learn from the data and prevent overfitting.
+
+The trainControl function sets up the cross-validation process with 5 folds (number = 5), enabling verbose iteration output (verboseIter = TRUE) and parallel processing (allowParallel = TRUE) for efficiency.
+
+Finally, the train function from the caret package is used to train the XGBoost model (method = "xgbTree"). It uses the defined params_grid to tune the model, training on the train dataset and aiming to minimize the RMSE.
+
+```{r Best parameters}
+best_params <- xgb_model$bestTune
+best_params
+```
+
+The best parameters is when max_depth = 9, eta = 0.1, gamma = 0, colsample_bytree = 0.75, min_child_weight = 2, subsample = 1. Let's put the best parameters into the XGBoost model and run it again!
+
+## Step 6: XGBoost model with Best Parameters
+
+```{r XGBoost model with the Best parameters, results='hide'}
+params_final <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  gamma = 0, 
+  min_child_weight = 2,
+  max_depth = 9,
+  subsample = 1, 
+  colsample_bytree = 0.75
+)
+
+xgb_model <- xgb.train(
+  params = params_final,
+  data = dtrain,
+  nrounds = 10000,
+  watchlist = list(eval = dtest, train = dtrain),
+  print_every_n = 10,
+  early_stopping_rounds = 5000,
+  maximize = FALSE
+)
+```
+
+Here, I used the best parameters I find though cross-validation and put into the model. I also hide the process of the code because it is too long.
+
+```{r rmse model_2}
+pred_2 = predict(xgb_model,
+                newdata = dtest)
+
+rmse_2 = rmse(test$price, pred_2)
+rmse_2
+```
+The second XGBoost model with parameters after cross validations has rmse of 4143.106. 
+
+## Step 7: Use All Data to Train
+
+```{r all data as train, results='hide'}
+dtrain_final <- xgb.DMatrix(data = as.matrix(selected_data[, -which(names(selected_data) == "price")]), 
+                            label = selected_data$price)
+
+params_final <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  gamma = 0, 
+  min_child_weight = 2,
+  max_depth = 9,
+  subsample = 1, 
+  colsample_bytree = 0.75
+)
+
+xgb_model_final <- xgb.train(
+  params = params_final,
+  data = dtrain_final,
+  nrounds = 10000,
+  watchlist = list(eval = dtest, train = dtrain),
+  print_every_n = 10,
+  early_stopping_rounds = 5000,
+  maximize = FALSE
+)
+```
+
+I also hide the process of the model but only keeps the result. After I found the model with best parameters, I was trying increase the amount of train data to make the model more accurate. Therefore, I used the whole dataset as the train data. I understand that this will cause the entire data set to be exposed to the model, and the accuracy of the model for new test data cannot be properly verified. But based on the final result, this method is feasible.
+
+```{r final rmse}
+pred_3 = predict(xgb_model_final,
+                newdata = dtest)
+
+rmse_3 = rmse(test$price, pred_3)
+rmse_3
+```
+## Step 8: Scoring Data Cleaning
+
+```{r clean the scoring data}
+
+selected_scoring <- scoring %>% select_if(is.numeric)
+selected_scoring$fuel_tank_volume_gallons[is.na(selected_scoring$fuel_tank_volume_gallons)] <- median(selected_scoring$fuel_tank_volume_gallons, na.rm = TRUE)
+selected_scoring$highway_fuel_economy[is.na(selected_scoring$highway_fuel_economy)] <- median(selected_scoring$highway_fuel_economy, na.rm = TRUE)
+selected_scoring$city_fuel_economy[is.na(selected_scoring$city_fuel_economy)] <- median(selected_scoring$city_fuel_economy, na.rm = TRUE)
+selected_scoring$wheelbase_inches[is.na(selected_scoring$wheelbase_inches)] <- median(selected_scoring$wheelbase_inches, na.rm = TRUE)
+selected_scoring$back_legroom_inches[is.na(selected_scoring$back_legroom_inches)] <- median(selected_scoring$back_legroom_inches, na.rm = TRUE)
+selected_scoring$front_legroom_inches[is.na(selected_scoring$front_legroom_inches)] <- median(selected_scoring$front_legroom_inches, na.rm = TRUE)
+selected_scoring$length_inches[is.na(selected_scoring$length_inches)] <- median(selected_scoring$length_inches, na.rm = TRUE)
+selected_scoring$width_inches[is.na(selected_scoring$width_inches)] <- median(selected_scoring$width_inches, na.rm = TRUE)
+selected_scoring$height_inches[is.na(selected_scoring$height_inches)] <- median(selected_scoring$height_inches, na.rm = TRUE)
+selected_scoring$engine_displacement[is.na(selected_scoring$engine_displacement)] <- median(selected_scoring$engine_displacement, na.rm = TRUE)
+selected_scoring$horsepower[is.na(selected_scoring$horsepower)] <- median(selected_scoring$horsepower, na.rm = TRUE)
+selected_scoring$daysonmarket[is.na(selected_scoring$daysonmarket)] <- median(selected_scoring$daysonmarket, na.rm = TRUE)
+selected_scoring$maximum_seating[is.na(selected_scoring$maximum_seating)] <- median(selected_scoring$maximum_seating, na.rm = TRUE)
+selected_scoring$year[is.na(selected_scoring$year)] <- median(selected_scoring$year, na.rm = TRUE)
+selected_scoring$mileage[is.na(selected_scoring$mileage)] <- median(selected_scoring$mileage, na.rm = TRUE)
+selected_scoring$owner_count[is.na(selected_scoring$owner_count)] <- median(selected_scoring$owner_count, na.rm = TRUE)
+selected_scoring$seller_rating[is.na(selected_scoring$seller_rating)] <- median(selected_scoring$seller_rating, na.rm = TRUE)
+
+selected_scoring <- selected_scoring[, -which(names(selected_scoring) == "id")]
+sapply(selected_scoring, class)
+sum(is.na(selected_scoring))
+```
+Now, there is no NA value and all the variables are in "numeric" class 
+
+## Step 9: Predict Price in Scoring Data
+```{r final prediction}
+pred_final = predict(xgb_model_final, newdata = as.matrix(selected_scoring))
+```
+
+## Step 10: Write the Submission File and Final Check
+```{r write the file and final check}
+submissionFile_final <- data.frame(id = scoring$id, price = pred_final)
+write.csv(submissionFile_final, 'chenyumao_kaggle_submission_final.csv',row.names = F)
+result <- read.csv("chenyumao_kaggle_submission_final.csv")
+nrow(result)
+sum(is.na(result))
+```
+After generated the submission and did the final check, we can see there is no missing values and complete 10000 lines of data. Because there is only four times of submissions per day on Kaggle, I don't want to waste the chances by submitting imcomplete submissions. 
+
+That is the end of the file, thanks for reading. Wish all the best. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
